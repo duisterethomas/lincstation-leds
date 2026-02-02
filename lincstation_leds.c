@@ -48,6 +48,14 @@
 #define NVME3_WHITE 0x40
 #define NVME3_RED 0x80
 
+// Disk device names
+#define HDD0_NAME "sda"
+#define HDD1_NAME "sdb"
+#define NVME0_NAME "nvme0n1"
+#define NVME1_NAME "nvme1n1"
+#define NVME2_NAME "nvme2n1"
+#define NVME3_NAME "nvme3n1"
+
 // Disk activity sample interval in microseconds
 #define DISK_SAMPLE_INTERVAL 1000000 // 1 second
 
@@ -332,12 +340,12 @@ void update_network_led() {
 int main(int argc, char *argv[]) {
     // Initializing variables
     disk_stats_t disks[6] = {
-        {"sda", 0, 0},
-        {"sdb", 0, 0},
-        {"nvme0n1", 0, 0},
-        {"nvme1n1", 0, 0},
-        {"nvme2n1", 0, 0},
-        {"nvme3n1", 0, 0}
+        {HDD0_NAME, 0, 0},
+        {HDD1_NAME, 0, 0},
+        {NVME0_NAME, 0, 0},
+        {NVME1_NAME, 0, 0},
+        {NVME2_NAME, 0, 0},
+        {NVME3_NAME, 0, 0}
     };
     int disk_check_count = NETWORK_SAMPLE_INTERVAL;
 
@@ -370,32 +378,32 @@ int main(int argc, char *argv[]) {
             int disk_status, led_reg, white_mask, red_mask, blink_reg;
 
             // Map disk to appropriate LED
-            if (strcmp(disks[i].device_name, "sda") == 0) {
+            if (strcmp(disks[i].device_name, HDD0_NAME) == 0) {
                 led_reg = LED_ON_REG_0;
                 white_mask = HDD0_WHITE;
                 red_mask = HDD0_RED;
                 blink_reg = HDD0_BLINK_REG;
-            } else if (strcmp(disks[i].device_name, "sdb") == 0) {
+            } else if (strcmp(disks[i].device_name, HDD1_NAME) == 0) {
                 led_reg = LED_ON_REG_0;
                 white_mask = HDD1_WHITE;
                 red_mask = HDD1_RED;
                 blink_reg = HDD1_BLINK_REG;
-            } else if (strcmp(disks[i].device_name, "nvme0n1") == 0) {
+            } else if (strcmp(disks[i].device_name, NVME0_NAME) == 0) {
                 led_reg = LED_ON_REG_1;
                 white_mask = NVME0_WHITE;
                 red_mask = NVME0_RED;
                 blink_reg = NVME0_BLINK_REG;
-            } else if (strcmp(disks[i].device_name, "nvme1n1") == 0) {
+            } else if (strcmp(disks[i].device_name, NVME1_NAME) == 0) {
                 led_reg = LED_ON_REG_1;
                 white_mask = NVME1_WHITE;
                 red_mask = NVME1_RED;
                 blink_reg = NVME1_BLINK_REG;
-            } else if (strcmp(disks[i].device_name, "nvme2n1") == 0) {
+            } else if (strcmp(disks[i].device_name, NVME2_NAME) == 0) {
                 led_reg = LED_ON_REG_1;
                 white_mask = NVME2_WHITE;
                 red_mask = NVME2_RED;
                 blink_reg = NVME2_BLINK_REG;
-            } else if (strcmp(disks[i].device_name, "nvme3n1") == 0) {
+            } else if (strcmp(disks[i].device_name, NVME3_NAME) == 0) {
                 led_reg = LED_ON_REG_1;
                 white_mask = NVME3_WHITE;
                 red_mask = NVME3_RED;
