@@ -96,29 +96,45 @@ void signal_handler(int signal) {
   running = 0;
 }
 
-// Find the I2C bus that has our LED controller
+// Find the I2C bus that has the LED controller
 int find_i2c_bus(void) {
   char filename[32];
   int fd;
-    
+  unsigned long funcs;
+
   for (int bus = 0; bus < MAX_I2C_BUS; bus++) {
     snprintf(filename, sizeof(filename), "/dev/i2c-%d", bus);
     fd = open(filename, O_RDWR);
-        
-    if (fd >= 0) {
-      if (ioctl(fd, I2C_SLAVE, I2C_DEVICE_ADDR) >= 0) {
-        // Try to read from the device using SMBus to verify it exists
-        __s32 result = i2c_smbus_read_byte(fd);
-        if (result >= 0 || errno == EAGAIN) {
-          close(fd);
-          if (debug) printf("Found LED controller on I2C bus %d\n", bus);
-          return bus;
-        }
-      }
+    if (fd < 0) continue;
+
+    // Verify this bus supports SMBus commands
+    if (ioctl(fd, I2C_FUNCS, &funcs) < 0) {
       close(fd);
+      continue;
     }
+
+    // Check for basic SMBus byte data support
+    if (!(funcs & I2C_FUNC_SMBUS_BYTE_DATA)) {
+      close(fd);
+      continue;
+    }
+
+    // Check if the device is not in use
+    if (ioctl(fd, I2C_SLAVE, I2C_DEVICE_ADDR) < 0) {
+        close(fd);
+        continue;
+    }
+
+    // Try to read from the device to verify it exists
+    if (i2c_smbus_read_byte_data(fd, 0x26) >= 0) {
+      close(fd);
+      if (debug) printf("Confirmed LED controller on SMBus %d\n", bus);
+      return bus;
+    }
+
+    close(fd);
   }
-    
+
   fprintf(stderr, "LED controller not found on any I2C bus\n");
   return -1;
 }
@@ -126,26 +142,26 @@ int find_i2c_bus(void) {
 // Initialize I2C communication
 int init_i2c(void) {
   char filename[32];
-    
+
   i2c_bus = find_i2c_bus();
   if (i2c_bus < 0) {
     return -1;
   }
-    
+
   snprintf(filename, sizeof(filename), "/dev/i2c-%d", i2c_bus);
   i2c_fd = open(filename, O_RDWR);
-    
+
   if (i2c_fd < 0) {
     perror("Failed to open I2C device");
     return -1;
   }
-    
+
   if (ioctl(i2c_fd, I2C_SLAVE, I2C_DEVICE_ADDR) < 0) {
     perror("Failed to set I2C slave address");
     cleanup_i2c();
     return -1;
   }
-    
+
   if (debug) printf("I2C initialized successfully on bus %d\n", i2c_bus);
   return 0;
 }
@@ -161,12 +177,12 @@ void cleanup_i2c(void) {
 // Write to I2C register using SMBus
 int write_i2c_register(int reg, int value) {
   __s32 result = i2c_smbus_write_byte_data(i2c_fd, reg, value);
-    
+
   if (result < 0) {
     perror("Failed to write to I2C device via SMBus");
     return -1;
   }
-    
+
   return 0;
 }
 
@@ -222,7 +238,7 @@ int read_disk_stats(disk_stats_t *disks, int num_disks) {
     perror("Failed to open /proc/diskstats");
     return -1;
   }
-    
+
   while (fgets(line, sizeof(line), fp)) {
     int parsed = sscanf(
       line, "%u %u %s %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
@@ -230,7 +246,7 @@ int read_disk_stats(disk_stats_t *disks, int num_disks) {
       &writes, &writes_merged, &write_sectors, &write_time,
       &io_in_progress, &io_time, &weighted_io_time
     );
-        
+
     if (parsed >= 14) {
       for (int i = 0; i < num_disks; i++) {
         if (strcmp(device, disks[i].device_name) == 0) {
@@ -253,24 +269,24 @@ int read_disk_stats(disk_stats_t *disks, int num_disks) {
           } else if (time_diff <= 0) {
             // overflow
           }
-                    
+
           // Check for activity (sectors read/written changed)
           disks[i].is_active =
             read_sectors != disks[i].prev_read_sectors
             ||
             write_sectors != disks[i].prev_write_sectors;
-                    
+
           // Update previous values
           disks[i].prev_read_sectors = read_sectors;
           disks[i].prev_write_sectors = write_sectors;
           disks[i].prev_write_time = io_time;
-                    
+
           break;
         }
       }
     }
   }
-    
+
   fclose(fp);
   return 0;
 }
@@ -282,42 +298,42 @@ int read_network_stats(network_stats_t *network) {
   char interface[32];
   unsigned long long rx_bytes, rx_packets, rx_errs, rx_drop, rx_fifo, rx_frame, rx_compressed, rx_multicast;
   unsigned long long tx_bytes, tx_packets, tx_errs, tx_drop, tx_fifo, tx_colls, tx_carrier, tx_compressed;
-    
+
   fp = fopen("/proc/net/dev", "r");
   if (!fp) {
     perror("Failed to open /proc/net/dev");
     return -1;
   }
-    
+
   // Skip header lines
   fgets(line, sizeof(line), fp);
   fgets(line, sizeof(line), fp);
-    
+
   network->is_active = 0;
-    
+
   while (fgets(line, sizeof(line), fp)) {
     int parsed = sscanf(line, "%31[^:]: %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                         interface, &rx_bytes, &rx_packets, &rx_errs, &rx_drop, &rx_fifo, &rx_frame, &rx_compressed, &rx_multicast,
                         &tx_bytes, &tx_packets, &tx_errs, &tx_drop, &tx_fifo, &tx_colls, &tx_carrier, &tx_compressed);
-        
+
     if (parsed >= 17) {
       // Skip loopback interface
       if (strncmp(interface, "lo", 2) == 0) {
         continue;
       }
-            
+
       // Check for network activity
       if (rx_bytes != network->prev_rx_bytes || tx_bytes != network->prev_tx_bytes) {
         network->is_active = 1;
         strncpy(network->interface_name, interface, sizeof(network->interface_name) - 1);
         network->interface_name[sizeof(network->interface_name) - 1] = '\0';
       }
-            
+
       network->prev_rx_bytes = rx_bytes;
       network->prev_tx_bytes = tx_bytes;
     }
   }
-    
+
   fclose(fp);
   return 0;
 }
@@ -326,7 +342,7 @@ int read_network_stats(network_stats_t *network) {
 void update_disk_leds(disk_stats_t *disks, int num_disks) {
   for (int i = 0; i < num_disks; i++) {
     int reg, white_mask, red_mask;
-        
+
     // Map disk to appropriate LED
     if (strcmp(disks[i].device_name, "sda") == 0) {
       reg = LED_ON_REG_0;
@@ -355,11 +371,11 @@ void update_disk_leds(disk_stats_t *disks, int num_disks) {
     } else {
       continue;  // Unknown disk
     }
-        
+
     // Turn off both colors first
     set_led_state(reg, white_mask, 0);
     set_led_state(reg, red_mask, 0);
-        
+
     // Set LED based on utilization and activity
     if (disks[i].is_active) {
       if (disks[i].utilization_percent >= HIGH_UTILIZATION_THRESHOLD) {
@@ -372,8 +388,8 @@ void update_disk_leds(disk_stats_t *disks, int num_disks) {
     }
 
     if (debug) {
-      printf("Disk %s: %.1f%% utilization, %s\n", 
-             disks[i].device_name, 
+      printf("Disk %s: %.1f%% utilization, %s\n",
+             disks[i].device_name,
              disks[i].utilization_percent,
              disks[i].is_active ? "active" : "idle");
     }
@@ -385,7 +401,7 @@ void update_network_led(network_stats_t *network) {
   // Turn off both colors first
   set_led_state(LED_ON_REG_0, NETWORK_WHITE, 0);
   set_led_state(LED_ON_REG_0, NETWORK_RED, 0);
-    
+
   if (network->is_active) {
     // Network activity - white LED
     set_led_state(LED_ON_REG_0, NETWORK_WHITE, 1);
@@ -404,11 +420,11 @@ int main(int argc, char *argv[]) {
     {"nvme2n1", 0, 0, 0, 0, 0.0, 0},
     {"nvme3n1", 0, 0, 0, 0, 0.0, 0}
   };
-    
+
   network_stats_t network = {"", 0, 0, 0};
 
   debug = getenv("LEDS_DEBUG") && strcmp(getenv("LEDS_DEBUG"), "true") == 0;
-  
+
   // Set up signal handlers
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
@@ -417,22 +433,22 @@ int main(int argc, char *argv[]) {
     printf("LED Disk & Network Activity Monitor\n");
     printf("Press Ctrl+C to exit\n\n");
   }
-    
+
   // Initialize I2C
   if (init_i2c() < 0) {
     fprintf(stderr, "Failed to initialize I2C\n");
     return 1;
   }
-    
+
   // Turn off all LEDs initially
   turn_off_all_leds();
-    
+
   // Initialize disk stats (first read to establish baseline)
   read_disk_stats(disks, 6);
   read_network_stats(&network);
 
   if (debug) printf("Starting monitoring loop...\n\n");
-    
+
   // Main monitoring loop
   while (running) {
     // Read current stats
@@ -440,25 +456,25 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "Failed to read disk stats\n");
       continue;
     }
-        
+
     if (read_network_stats(&network) < 0) {
       fprintf(stderr, "Failed to read network stats\n");
       continue;
     }
-        
+
     // Update LEDs
     update_disk_leds(disks, 6);
     update_network_led(&network);
-        
+
     if (debug) printf("---\n");
-        
+
     // Wait before next iteration
     usleep(ACTIVITY_SAMPLE_INTERVAL);
   }
-    
+
   // Cleanup
   if (debug) printf("Starting cleanup...\n");
-  
+
   // Turn off all LEDs with retry
   int retry_count = 0;
   while (retry_count < CLEANUP_MAX_RETRIES) {
@@ -470,9 +486,9 @@ int main(int argc, char *argv[]) {
     retry_count++;
   }
   if (debug) printf("Cleanup completed after %d attempts.\n", retry_count);
-  
+
   cleanup_i2c();
-    
+
   if (debug) printf("LED monitor stopped.\n");
   return 0;
 }
