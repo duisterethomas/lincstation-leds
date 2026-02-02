@@ -71,13 +71,6 @@ typedef struct {
     unsigned long long prev_writes;
 } disk_stats_t;
 
-typedef struct {
-    char interface_name[32];
-    unsigned long long prev_rx_bytes;
-    unsigned long long prev_tx_bytes;
-    int is_active;
-} network_stats_t;
-
 // Global variables
 static int i2c_fd = -1;
 static int i2c_bus = -1;
