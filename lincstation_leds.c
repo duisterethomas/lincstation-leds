@@ -54,9 +54,8 @@
 // Amount of disk activity samples before network check
 #define NETWORK_SAMPLE_INTERVAL 60
 
-// Cleanup retry settings
-#define CLEANUP_MAX_RETRIES 3
-#define CLEANUP_RETRY_DELAY 100000 // 100ms in microseconds
+// Cleanup delay in microseconds
+#define CLEANUP_DELAY 500000 // 500ms
 
 typedef struct {
     char device_name[32];
@@ -78,19 +77,18 @@ static volatile int running = 1;
 static int debug = 0;
 
 // Function prototypes
+void signal_handler(int signal);
 int find_i2c_bus(void);
 int init_i2c(void);
-void cleanup_i2c(void);
 int write_i2c_register(int reg, int value);
 void set_led_state(int reg, int mask, int state);
 void set_blink_state(int reg, int state);
+void turn_off_all_leds(void);
 int get_disk_status(disk_stats_t *disk);
 int get_disk_health(const char* disk_name);
 int is_connected_to_network();
 int is_connected_to_internet();
 void update_network_led();
-void signal_handler(int signal);
-void turn_off_all_leds(void);
 
 // Signal handler for graceful shutdown
 void signal_handler(int signal) {
@@ -145,6 +143,7 @@ int find_i2c_bus(void) {
 int init_i2c(void) {
     char filename[32];
 
+    // Return if no bus has been found
     i2c_bus = find_i2c_bus();
     if (i2c_bus < 0) {
         return -1;
@@ -160,20 +159,12 @@ int init_i2c(void) {
 
     if (ioctl(i2c_fd, I2C_SLAVE, I2C_DEVICE_ADDR) < 0) {
         perror("Failed to set I2C slave address");
-        cleanup_i2c();
+        if (i2c_fd >= 0) close(i2c_fd);
         return -1;
     }
 
     if (debug) printf("I2C initialized successfully on bus %d\n", i2c_bus);
     return 0;
-}
-
-// Cleanup I2C resources
-void cleanup_i2c(void) {
-    if (i2c_fd >= 0) {
-        close(i2c_fd);
-        i2c_fd = -1;
-    }
 }
 
 // Write to I2C register using SMBus
@@ -188,16 +179,16 @@ int write_i2c_register(int reg, int value) {
     return 0;
 }
 
-// Set LED state (on/off)
+// Turn LED on or off
 void set_led_state(int reg, int mask, int state) {
     if (state) {
         write_i2c_register(reg, mask);
     } else {
-        write_i2c_register(reg + 0x10, mask);    // OFF register is +0x10 from ON register
+        write_i2c_register(reg + 0x10, mask); // OFF register is +0x10 from ON register
     }
 }
 
-// Set blink state (on/off)
+// Enable or disable LED blinking
 void set_blink_state(int reg, int state) {
     if (state) {
         write_i2c_register(reg, 0x01);
@@ -206,7 +197,6 @@ void set_blink_state(int reg, int state) {
     }
 }
 
-// Turn off all LEDs
 void turn_off_all_leds(void) {
     if (debug) printf("Turning off all LEDs and disabling blinking...\n");
 
@@ -215,25 +205,23 @@ void turn_off_all_leds(void) {
     write_i2c_register(LED_OFF_REG_0, HDD1_WHITE | HDD1_RED);
     write_i2c_register(LED_OFF_REG_0, NETWORK_WHITE | NETWORK_RED);
 
-    // --- Disable blinking for HDD and network ---
-    write_i2c_register(HDD0_BLINK_REG, 0x00);
-    write_i2c_register(HDD1_BLINK_REG, 0x00);
-    write_i2c_register(NETWORK_BLINK_REG, 0x00);
-
     // --- Turn off NVMe LEDs ---
     write_i2c_register(LED_OFF_REG_1, NVME0_WHITE | NVME0_RED);
     write_i2c_register(LED_OFF_REG_1, NVME1_WHITE | NVME1_RED);
     write_i2c_register(LED_OFF_REG_1, NVME2_WHITE | NVME2_RED);
     write_i2c_register(LED_OFF_REG_1, NVME3_WHITE | NVME3_RED);
 
-    // --- Disable blinking for NVMe slots ---
+    // --- Disable blinking on all LEDs ---
+    write_i2c_register(HDD0_BLINK_REG, 0x00);
+    write_i2c_register(HDD1_BLINK_REG, 0x00);
+    write_i2c_register(NETWORK_BLINK_REG, 0x00);
     write_i2c_register(NVME0_BLINK_REG, 0x00);
     write_i2c_register(NVME1_BLINK_REG, 0x00);
     write_i2c_register(NVME2_BLINK_REG, 0x00);
     write_i2c_register(NVME3_BLINK_REG, 0x00);
 }
 
-// Check the state of a disk
+// Check if a disk is connected and if there is activity on that disk
 int get_disk_status(disk_stats_t *disk) {
     char path[256];
     snprintf(path, sizeof(path), "/sys/block/%s/stat", disk->device_name);
@@ -260,6 +248,7 @@ int get_disk_status(disk_stats_t *disk) {
     return activity;
 }
 
+// Check the SMART health summary
 int get_disk_health(const char* disk_name) {
     char cmd[128];
     char buffer[256];
@@ -280,6 +269,7 @@ int get_disk_health(const char* disk_name) {
     return passed;
 }
 
+// Check if the host is connected to a local network
 int is_connected_to_network() {
     struct ifaddrs *ifaddr, *ifa;
     int connected = 0;
@@ -299,6 +289,7 @@ int is_connected_to_network() {
     return connected;
 }
 
+// Check if the host has internet access
 int is_connected_to_internet() {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return 0;
@@ -339,6 +330,7 @@ void update_network_led() {
 }
 
 int main(int argc, char *argv[]) {
+    // Initializing variables
     disk_stats_t disks[6] = {
         {"sda", 0, 0},
         {"sdb", 0, 0},
@@ -347,17 +339,18 @@ int main(int argc, char *argv[]) {
         {"nvme2n1", 0, 0},
         {"nvme3n1", 0, 0}
     };
+    int disk_check_count = NETWORK_SAMPLE_INTERVAL;
 
+    // Check for debug environment variable
     debug = getenv("LEDS_DEBUG") && strcmp(getenv("LEDS_DEBUG"), "true") == 0;
-
-    // Set up signal handlers
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-
     if (debug) {
         printf("LED Disk & Network Activity Monitor\n");
         printf("Press Ctrl+C to exit\n\n");
     }
+
+    // Set up signal handlers
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
 
     // Initialize I2C
     if (init_i2c() < 0) {
@@ -370,15 +363,11 @@ int main(int argc, char *argv[]) {
 
     if (debug) printf("Starting monitoring loop...\n\n");
 
-    int disk_check_count = NETWORK_SAMPLE_INTERVAL;
     // Main monitoring loop
     while (running) {
         // Update disk LEDs
         for (int i = 0; i < 6; i++) {
             int disk_status, led_reg, white_mask, red_mask, blink_reg;
-
-            // Get the status of sda
-            disk_status = get_disk_status(&disks[i]);
 
             // Map disk to appropriate LED
             if (strcmp(disks[i].device_name, "sda") == 0) {
@@ -415,6 +404,9 @@ int main(int argc, char *argv[]) {
                 continue; // Unknown disk
             }
 
+            // Get the status of the disk
+            disk_status = get_disk_status(&disks[i]);
+
             // Turn led and blink off if disk not connected
             if (disk_status == -1) {
                 if (debug) printf("Disk: %s not connected\n", disks[i].device_name);
@@ -424,7 +416,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            // Make led red if disk health issue
+            // Make LED red if disk SMART check fails
             if (!get_disk_health(disks[i].device_name)) {
                 if (debug) printf("Disk: %s SMART failed\n", disks[i].device_name);
                 set_led_state(led_reg, white_mask, 0);
@@ -433,7 +425,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            // Make led blink if there is disk activity
+            // Make LED blink if there is disk activity
             if (disk_status == 1) {
                 if (debug) printf("Disk: %s activity\n", disks[i].device_name);
                 set_blink_state(blink_reg, 1);
@@ -442,7 +434,7 @@ int main(int argc, char *argv[]) {
                 set_blink_state(blink_reg, 0);
             }
 
-            // Make led white because the disk is healty
+            // Make LED white because the disk is healty
             set_led_state(led_reg, white_mask, 1);
             set_led_state(led_reg, red_mask, 0);
         }
@@ -463,20 +455,15 @@ int main(int argc, char *argv[]) {
     // Cleanup
     if (debug) printf("Starting cleanup...\n");
 
-    // Turn off all LEDs with retry
-    int retry_count = 0;
-    while (retry_count < CLEANUP_MAX_RETRIES) {
-        if (debug) printf("Attempt %d/%d: Turning off LEDs...\n", retry_count + 1, CLEANUP_MAX_RETRIES);
-        // Turn off all LEDs (this function already handles blinking)
-        turn_off_all_leds();
-        // Small delay to ensure I2C commands complete
-        usleep(CLEANUP_RETRY_DELAY);
-        retry_count++;
-    }
-    if (debug) printf("Cleanup completed after %d attempts.\n", retry_count);
+    // Wait a bit before turning off all LEDs
+    usleep(CLEANUP_DELAY);
 
-    cleanup_i2c();
+    if (debug) printf("Turning off LEDs...\n");
+    turn_off_all_leds();
 
-    if (debug) printf("LED monitor stopped.\n");
+    if (debug) printf("Closing I2C bus...\n");
+    if (i2c_fd >= 0) close(i2c_fd);
+
+    if (debug) printf("Goodbye!\n");
     return 0;
 }
