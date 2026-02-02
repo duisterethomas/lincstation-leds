@@ -60,7 +60,7 @@
 #define DISK_SAMPLE_INTERVAL 1000000 // 1 second
 
 // Amount of disk activity samples before network check
-#define NETWORK_SAMPLE_INTERVAL 60
+#define NETWORK_SAMPLE_INTERVAL 60 // Every 60 disk samples
 
 // Cleanup delay in microseconds
 #define CLEANUP_DELAY 500000 // 500ms
