@@ -44,9 +44,8 @@
 #define NVME3_WHITE 0x40
 #define NVME3_RED 0x80
 
-// Thresholds for activity levels
-#define HIGH_UTILIZATION_THRESHOLD 70.0
-#define ACTIVITY_SAMPLE_INTERVAL 1000000 // 1 second in microseconds
+// Activity sample interval in microseconds
+#define ACTIVITY_SAMPLE_INTERVAL 1000000 // 1 second
 
 // Cleanup retry settings
 #define CLEANUP_MAX_RETRIES 3
@@ -54,12 +53,8 @@
 
 typedef struct {
     char device_name[32];
-    unsigned long long prev_read_sectors;
-    unsigned long long prev_write_sectors;
-    unsigned long long prev_read_time;
-    unsigned long long prev_write_time;
-    double utilization_percent;
-    int is_active;
+    unsigned long long prev_reads;
+    unsigned long long prev_writes;
 } disk_stats_t;
 
 typedef struct {
@@ -81,9 +76,10 @@ int init_i2c(void);
 void cleanup_i2c(void);
 int write_i2c_register(int reg, int value);
 void set_led_state(int reg, int mask, int state);
-void update_disk_leds(disk_stats_t *disks, int num_disks);
+void set_blink_state(int reg, int state);
+int get_disk_status(disk_stats_t *disk);
+int get_disk_health(const char* disk_name);
 void update_network_led(network_stats_t *network);
-int read_disk_stats(disk_stats_t *disks, int num_disks);
 int read_network_stats(network_stats_t *network);
 void signal_handler(int signal);
 void turn_off_all_leds(void);
@@ -193,6 +189,15 @@ void set_led_state(int reg, int mask, int state) {
     }
 }
 
+// Set blink state (on/off)
+void set_blink_state(int reg, int state) {
+    if (state) {
+        write_i2c_register(reg, 0x01);
+    } else {
+        write_i2c_register(reg, 0x00);
+    }
+}
+
 // Turn off all LEDs
 void turn_off_all_leds(void) {
     if (debug) printf("Turning off all LEDs and disabling blinking...\n");
@@ -220,73 +225,51 @@ void turn_off_all_leds(void) {
     write_i2c_register(NVME3_BLINK_REG, 0x00);
 }
 
-// Read disk statistics from /proc/diskstats
-int read_disk_stats(disk_stats_t *disks, int num_disks) {
-    FILE *fp;
-    char line[256];
-    unsigned int major, minor;
-    char device[32];
-    unsigned long long reads, reads_merged, read_sectors, read_time;
-    unsigned long long writes, writes_merged, write_sectors, write_time;
-    unsigned long long io_in_progress, io_time, weighted_io_time;
+// Check the state of a disk
+int get_disk_status(disk_stats_t *disk) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/block/%s/stat", disk->device_name);
 
-    // see spec at https://www.kernel.org/doc/html/latest/admin-guide/iostats.html
-    fp = fopen("/proc/diskstats", "r");
-    if (!fp) {
-        perror("Failed to open /proc/diskstats");
+    FILE* f = fopen(path, "r");
+    if (!f) return -1; // Disk name not found or permission denied
+
+    unsigned long long r, w;
+    // Field 1: read I/Os, Field 5: write I/Os
+    // %*llu is used to skip the fields in between (fields 2, 3, and 4)
+    if (fscanf(f, "%llu %*llu %*llu %*llu %llu", &r, &w) != 2) {
+        fclose(f);
         return -1;
     }
+    fclose(f);
 
-    while (fgets(line, sizeof(line), fp)) {
-        int parsed = sscanf(
-            line, "%u %u %s %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
-            &major, &minor, device, &reads, &reads_merged, &read_sectors, &read_time,
-            &writes, &writes_merged, &write_sectors, &write_time,
-            &io_in_progress, &io_time, &weighted_io_time
-        );
+    // Activity is detected if current counters are greater than previous counters
+    int activity = (r > disk->prev_reads || w > disk->prev_writes);
 
-        if (parsed >= 14) {
-            for (int i = 0; i < num_disks; i++) {
-                if (strcmp(device, disks[i].device_name) == 0) {
-                    // Calculate utilization based on I/O time
-                    double time_diff = (double)(io_time - disks[i].prev_write_time);
-                    if (time_diff < 0) {
-                        // overflow
-                        time_diff += ULONG_MAX;
-                    }
-                    if (time_diff >= 0) {
-                        // time_diff converted from milliseconds to micros
-                        disks[i].utilization_percent =
-                            time_diff
-                            * 1000 // time_diff converted from milliseconds to micros
-                            / ACTIVITY_SAMPLE_INTERVAL
-                            * 100.0; // convert to percentage
-                        if (disks[i].utilization_percent > 100.0) {
-                            disks[i].utilization_percent = 100.0;
-                        }
-                    } else if (time_diff <= 0) {
-                        // overflow
-                    }
+    // Update trackers for the next call
+    disk->prev_reads = r;
+    disk->prev_writes = w;
 
-                    // Check for activity (sectors read/written changed)
-                    disks[i].is_active =
-                        read_sectors != disks[i].prev_read_sectors
-                        ||
-                        write_sectors != disks[i].prev_write_sectors;
+    return activity;
+}
 
-                    // Update previous values
-                    disks[i].prev_read_sectors = read_sectors;
-                    disks[i].prev_write_sectors = write_sectors;
-                    disks[i].prev_write_time = io_time;
+int get_disk_health(const char* disk_name) {
+    char cmd[128];
+    char buffer[256];
+    // -H checks the "health summary" (PASSED or FAILED)
+    snprintf(cmd, sizeof(cmd), "smartctl -H /dev/%s", disk_name);
 
-                    break;
-                }
-            }
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return -1;
+
+    int passed = 0;
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        if (strstr(buffer, "PASSED")) {
+            passed = 1;
+            break;
         }
     }
-
-    fclose(fp);
-    return 0;
+    pclose(pipe);
+    return passed;
 }
 
 // Read network statistics from /proc/net/dev
@@ -336,64 +319,6 @@ int read_network_stats(network_stats_t *network) {
     return 0;
 }
 
-// Update disk LEDs based on utilization
-void update_disk_leds(disk_stats_t *disks, int num_disks) {
-    for (int i = 0; i < num_disks; i++) {
-        int reg, white_mask, red_mask;
-
-        // Map disk to appropriate LED
-        if (strcmp(disks[i].device_name, "sda") == 0) {
-            reg = LED_ON_REG_0;
-            white_mask = HDD0_WHITE;
-            red_mask = HDD0_RED;
-        } else if (strcmp(disks[i].device_name, "sdb") == 0) {
-            reg = LED_ON_REG_0;
-            white_mask = HDD1_WHITE;
-            red_mask = HDD1_RED;
-        } else if (strcmp(disks[i].device_name, "nvme0n1") == 0) {
-            reg = LED_ON_REG_1;
-            white_mask = NVME0_WHITE;
-            red_mask = NVME0_RED;
-        } else if (strcmp(disks[i].device_name, "nvme1n1") == 0) {
-            reg = LED_ON_REG_1;
-            white_mask = NVME1_WHITE;
-            red_mask = NVME1_RED;
-        } else if (strcmp(disks[i].device_name, "nvme2n1") == 0) {
-            reg = LED_ON_REG_1;
-            white_mask = NVME2_WHITE;
-            red_mask = NVME2_RED;
-        } else if (strcmp(disks[i].device_name, "nvme3n1") == 0) {
-            reg = LED_ON_REG_1;
-            white_mask = NVME3_WHITE;
-            red_mask = NVME3_RED;
-        } else {
-            continue; // Unknown disk
-        }
-
-        // Turn off both colors first
-        set_led_state(reg, white_mask, 0);
-        set_led_state(reg, red_mask, 0);
-
-        // Set LED based on utilization and activity
-        if (disks[i].is_active) {
-            if (disks[i].utilization_percent >= HIGH_UTILIZATION_THRESHOLD) {
-                // High utilization - red LED
-                set_led_state(reg, red_mask, 1);
-            } else {
-                // Low utilization but active - dim white LED
-                set_led_state(reg, white_mask, 1);
-            }
-        }
-
-        if (debug) {
-            printf("Disk %s: %.1f%% utilization, %s\n",
-                         disks[i].device_name,
-                         disks[i].utilization_percent,
-                         disks[i].is_active ? "active" : "idle");
-        }
-    }
-}
-
 // Update network LED based on activity
 void update_network_led(network_stats_t *network) {
     // Turn off both colors first
@@ -411,12 +336,12 @@ void update_network_led(network_stats_t *network) {
 
 int main(int argc, char *argv[]) {
     disk_stats_t disks[6] = {
-        {"sda", 0, 0, 0, 0, 0.0, 0},
-        {"sdb", 0, 0, 0, 0, 0.0, 0},
-        {"nvme0n1", 0, 0, 0, 0, 0.0, 0},
-        {"nvme1n1", 0, 0, 0, 0, 0.0, 0},
-        {"nvme2n1", 0, 0, 0, 0, 0.0, 0},
-        {"nvme3n1", 0, 0, 0, 0, 0.0, 0}
+        {"sda", 0, 0},
+        {"sdb", 0, 0},
+        {"nvme0n1", 0, 0},
+        {"nvme1n1", 0, 0},
+        {"nvme2n1", 0, 0},
+        {"nvme3n1", 0, 0}
     };
 
     network_stats_t network = {"", 0, 0, 0};
@@ -442,26 +367,93 @@ int main(int argc, char *argv[]) {
     turn_off_all_leds();
 
     // Initialize disk stats (first read to establish baseline)
-    read_disk_stats(disks, 6);
     read_network_stats(&network);
 
     if (debug) printf("Starting monitoring loop...\n\n");
 
     // Main monitoring loop
     while (running) {
-        // Read current stats
-        if (read_disk_stats(disks, 6) < 0) {
-            fprintf(stderr, "Failed to read disk stats\n");
-            continue;
-        }
-
+        // Read current network stats
         if (read_network_stats(&network) < 0) {
             fprintf(stderr, "Failed to read network stats\n");
             continue;
         }
 
-        // Update LEDs
-        update_disk_leds(disks, 6);
+        // Update disk LEDs
+        for (int i = 0; i < 6; i++) {
+            int disk_status, led_reg, white_mask, red_mask, blink_reg;
+
+            // Get the status of sda
+            disk_status = get_disk_status(&disks[i]);
+
+            // Map disk to appropriate LED
+            if (strcmp(disks[i].device_name, "sda") == 0) {
+                led_reg = LED_ON_REG_0;
+                white_mask = HDD0_WHITE;
+                red_mask = HDD0_RED;
+                blink_reg = HDD0_BLINK_REG;
+            } else if (strcmp(disks[i].device_name, "sdb") == 0) {
+                led_reg = LED_ON_REG_0;
+                white_mask = HDD1_WHITE;
+                red_mask = HDD1_RED;
+                blink_reg = HDD1_BLINK_REG;
+            } else if (strcmp(disks[i].device_name, "nvme0n1") == 0) {
+                led_reg = LED_ON_REG_1;
+                white_mask = NVME0_WHITE;
+                red_mask = NVME0_RED;
+                blink_reg = NVME0_BLINK_REG;
+            } else if (strcmp(disks[i].device_name, "nvme1n1") == 0) {
+                led_reg = LED_ON_REG_1;
+                white_mask = NVME1_WHITE;
+                red_mask = NVME1_RED;
+                blink_reg = NVME1_BLINK_REG;
+            } else if (strcmp(disks[i].device_name, "nvme2n1") == 0) {
+                led_reg = LED_ON_REG_1;
+                white_mask = NVME2_WHITE;
+                red_mask = NVME2_RED;
+                blink_reg = NVME2_BLINK_REG;
+            } else if (strcmp(disks[i].device_name, "nvme3n1") == 0) {
+                led_reg = LED_ON_REG_1;
+                white_mask = NVME3_WHITE;
+                red_mask = NVME3_RED;
+                blink_reg = NVME3_BLINK_REG;
+            } else {
+                continue; // Unknown disk
+            }
+
+            // Turn led and blink off if disk not connected
+            if (disk_status == -1) {
+                if (debug) printf("Disk: %s not connected\n", disks[i].device_name);
+                set_led_state(led_reg, white_mask, 0);
+                set_led_state(led_reg, red_mask, 0);
+                set_blink_state(blink_reg, 0);
+                continue;
+            }
+
+            // Make led red if disk health issue
+            if (!get_disk_health(disks[i].device_name)) {
+                if (debug) printf("Disk: %s SMART failed\n", disks[i].device_name);
+                set_led_state(led_reg, white_mask, 0);
+                set_led_state(led_reg, red_mask, 1);
+                set_blink_state(blink_reg, 0);
+                continue;
+            }
+
+            // Make led blink if there is disk activity
+            if (disk_status == 1) {
+                if (debug) printf("Disk: %s activity\n", disks[i].device_name);
+                set_blink_state(blink_reg, 1);
+            } else {
+                if (debug) printf("Disk: %s connected\n", disks[i].device_name);
+                set_blink_state(blink_reg, 0);
+            }
+
+            // Make led white because the disk is healty
+            set_led_state(led_reg, white_mask, 1);
+            set_led_state(led_reg, red_mask, 0);
+        }
+
+        // Update network LED
         update_network_led(&network);
 
         if (debug) printf("---\n");
