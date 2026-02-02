@@ -1,12 +1,16 @@
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <i2c/smbus.h>
+#include <ifaddrs.h>
 #include <limits.h>
 #include <linux/i2c-dev.h>
+#include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 // I2C device address and bus
@@ -44,8 +48,11 @@
 #define NVME3_WHITE 0x40
 #define NVME3_RED 0x80
 
-// Activity sample interval in microseconds
-#define ACTIVITY_SAMPLE_INTERVAL 1000000 // 1 second
+// Disk activity sample interval in microseconds
+#define DISK_SAMPLE_INTERVAL 1000000 // 1 second
+
+// Amount of disk activity samples before network check
+#define NETWORK_SAMPLE_INTERVAL 60
 
 // Cleanup retry settings
 #define CLEANUP_MAX_RETRIES 3
@@ -79,8 +86,9 @@ void set_led_state(int reg, int mask, int state);
 void set_blink_state(int reg, int state);
 int get_disk_status(disk_stats_t *disk);
 int get_disk_health(const char* disk_name);
-void update_network_led(network_stats_t *network);
-int read_network_stats(network_stats_t *network);
+int is_connected_to_network();
+int is_connected_to_internet();
+void update_network_led();
 void signal_handler(int signal);
 void turn_off_all_leds(void);
 
@@ -272,66 +280,62 @@ int get_disk_health(const char* disk_name) {
     return passed;
 }
 
-// Read network statistics from /proc/net/dev
-int read_network_stats(network_stats_t *network) {
-    FILE *fp;
-    char line[256];
-    char interface[32];
-    unsigned long long rx_bytes, rx_packets, rx_errs, rx_drop, rx_fifo, rx_frame, rx_compressed, rx_multicast;
-    unsigned long long tx_bytes, tx_packets, tx_errs, tx_drop, tx_fifo, tx_colls, tx_carrier, tx_compressed;
+int is_connected_to_network() {
+    struct ifaddrs *ifaddr, *ifa;
+    int connected = 0;
 
-    fp = fopen("/proc/net/dev", "r");
-    if (!fp) {
-        perror("Failed to open /proc/net/dev");
-        return -1;
-    }
+    if (getifaddrs(&ifaddr) == -1) return 0;
 
-    // Skip header lines
-    fgets(line, sizeof(line), fp);
-    fgets(line, sizeof(line), fp);
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
 
-    network->is_active = 0;
-
-    while (fgets(line, sizeof(line), fp)) {
-        int parsed = sscanf(line, "%31[^:]: %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
-                            interface, &rx_bytes, &rx_packets, &rx_errs, &rx_drop, &rx_fifo, &rx_frame, &rx_compressed, &rx_multicast,
-                            &tx_bytes, &tx_packets, &tx_errs, &tx_drop, &tx_fifo, &tx_colls, &tx_carrier, &tx_compressed);
-
-        if (parsed >= 17) {
-            // Skip loopback interface
-            if (strncmp(interface, "lo", 2) == 0) {
-                continue;
-            }
-
-            // Check for network activity
-            if (rx_bytes != network->prev_rx_bytes || tx_bytes != network->prev_tx_bytes) {
-                network->is_active = 1;
-                strncpy(network->interface_name, interface, sizeof(network->interface_name) - 1);
-                network->interface_name[sizeof(network->interface_name) - 1] = '\0';
-            }
-
-            network->prev_rx_bytes = rx_bytes;
-            network->prev_tx_bytes = tx_bytes;
+        // Check if interface is UP and not a loopback (lo)
+        if ((ifa->ifa_flags & IFF_UP) && !(ifa->ifa_flags & IFF_LOOPBACK)) {
+            connected = 1;
+            break;
         }
     }
-
-    fclose(fp);
-    return 0;
+    freeifaddrs(ifaddr);
+    return connected;
 }
 
-// Update network LED based on activity
-void update_network_led(network_stats_t *network) {
-    // Turn off both colors first
-    set_led_state(LED_ON_REG_0, NETWORK_WHITE, 0);
-    set_led_state(LED_ON_REG_0, NETWORK_RED, 0);
+int is_connected_to_internet() {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return 0;
 
-    if (network->is_active) {
-        // Network activity - white LED
-        set_led_state(LED_ON_REG_0, NETWORK_WHITE, 1);
-        if (debug) printf("Network: active on %s\n", network->interface_name);
-    } else {
-        if (debug) printf("Network: idle\n");
+    struct sockaddr_in serv_addr;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(53); // DNS port
+    inet_pton(AF_INET, "8.8.8.8", &serv_addr.sin_addr);
+
+    // Try connecting with a timeout
+    int result = connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
+    close(sock);
+
+    return (result == 0); // 1 if success, 0 if fail
+}
+
+void update_network_led() {
+    // Turn LED off if not connected to a network
+    if (!is_connected_to_network()) {
+        if (debug) printf("Network: not connected\n");
+        set_led_state(LED_ON_REG_0, NETWORK_WHITE, 0);
+        set_led_state(LED_ON_REG_0, NETWORK_RED, 0);
+        return;
     }
+
+    // Set LED to white if connected to internet
+    if (is_connected_to_internet()) {
+        if (debug) printf("Network: connected\n");
+        set_led_state(LED_ON_REG_0, NETWORK_WHITE, 1);
+        set_led_state(LED_ON_REG_0, NETWORK_RED, 0);
+        return;
+    }
+
+    // Set LED to red if not connected to internet
+    if (debug) printf("Network: no internet\n");
+    set_led_state(LED_ON_REG_0, NETWORK_WHITE, 0);
+    set_led_state(LED_ON_REG_0, NETWORK_RED, 1);
 }
 
 int main(int argc, char *argv[]) {
@@ -343,8 +347,6 @@ int main(int argc, char *argv[]) {
         {"nvme2n1", 0, 0},
         {"nvme3n1", 0, 0}
     };
-
-    network_stats_t network = {"", 0, 0, 0};
 
     debug = getenv("LEDS_DEBUG") && strcmp(getenv("LEDS_DEBUG"), "true") == 0;
 
@@ -366,19 +368,11 @@ int main(int argc, char *argv[]) {
     // Turn off all LEDs initially
     turn_off_all_leds();
 
-    // Initialize disk stats (first read to establish baseline)
-    read_network_stats(&network);
-
     if (debug) printf("Starting monitoring loop...\n\n");
 
+    int disk_check_count = NETWORK_SAMPLE_INTERVAL;
     // Main monitoring loop
     while (running) {
-        // Read current network stats
-        if (read_network_stats(&network) < 0) {
-            fprintf(stderr, "Failed to read network stats\n");
-            continue;
-        }
-
         // Update disk LEDs
         for (int i = 0; i < 6; i++) {
             int disk_status, led_reg, white_mask, red_mask, blink_reg;
@@ -454,12 +448,16 @@ int main(int argc, char *argv[]) {
         }
 
         // Update network LED
-        update_network_led(&network);
+        if (disk_check_count >= NETWORK_SAMPLE_INTERVAL) {
+            disk_check_count = 0;
+            update_network_led();
+        }
+        disk_check_count ++;
 
         if (debug) printf("---\n");
 
         // Wait before next iteration
-        usleep(ACTIVITY_SAMPLE_INTERVAL);
+        usleep(DISK_SAMPLE_INTERVAL);
     }
 
     // Cleanup
