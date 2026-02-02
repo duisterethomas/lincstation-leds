@@ -4,7 +4,7 @@ A daemon to use the LincStation N2 LEDs on Linux other than Unraid.
 > [!NOTE]
 > This is a fork of [elias-gvin/lincstation_leds](https://github.com/elias-gvin/lincstation_leds), which in and of itself is a fork of [fazalmajid/lincstation_leds](https://github.com/fazalmajid/lincstation_leds). If you would like to know more about the origin of this project or don't like my approach to the LEDs, please check out their repos as well.
 
-I mostly used the original code as a base, but most of it has changed. Do note that I'm not very familiar in C, so if there are any issues (or memory leaks, I know that C is prone to that) please let me know in the [issues](./issues).
+I mostly used the original code as a base, but most of it has changed. Do note that I'm not very familiar in C, so if there are any issues (or memory leaks, I know that C is prone to that) please let me know in the [issues](https://github.com/duisterethomas/lincstation-leds/issues).
 
 > [!IMPORTANT]
 > I'm developing this fork for and testing this fork on [Proxmox VE](https://www.proxmox.com/en/products/proxmox-virtual-environment/overview), so keep in mind that the installation instructions might not work on other linux distros. 
