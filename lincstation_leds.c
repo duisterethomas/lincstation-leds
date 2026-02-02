@@ -264,7 +264,10 @@ int get_disk_health(const char* disk_name) {
     snprintf(cmd, sizeof(cmd), "smartctl -H /dev/%s", disk_name);
 
     FILE* pipe = popen(cmd, "r");
-    if (!pipe) return -1;
+    if (!pipe) {
+        printf("Failed to check S.M.A.R.T. health test result\n");
+        return -1;
+    }
 
     int passed = 0;
     while (fgets(buffer, sizeof(buffer), pipe)) {
@@ -425,8 +428,8 @@ int main(int argc, char *argv[]) {
             }
 
             // Make LED red if disk SMART check fails
-            if (!get_disk_health(disks[i].device_name)) {
-                if (debug) printf("Disk: %s SMART failed\n", disks[i].device_name);
+            if (get_disk_health(disks[i].device_name) == 0) {
+                if (debug) printf("Disk: %s S.M.A.R.T. health test result: FAILED\n", disks[i].device_name);
                 set_led_state(led_reg, white_mask, 0);
                 set_led_state(led_reg, red_mask, 1);
                 set_blink_state(blink_reg, 0);
