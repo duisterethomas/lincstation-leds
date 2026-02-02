@@ -1,4 +1,3 @@
-#include <errno.h>
 #include <fcntl.h>
 #include <i2c/smbus.h>
 #include <limits.h>
@@ -8,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <time.h>
 #include <unistd.h>
 
 // I2C device address and bus
